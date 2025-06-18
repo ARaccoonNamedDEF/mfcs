@@ -1,13 +1,8 @@
 --@name mfcs_interfaces/Test Tank
 --@author DEF
---@include mfcs/core.txt
---@include mfcs/camera_module_core.txt
---@include mfcs/computer_module_core.txt
---@include mfcs/graphic_module_core.txt
---@includedir mfcs_content
 
 local function GlobalSettings()
-    
+    --@include mfcs/core.txt
     require("mfcs/core.txt")
     local SH = {}
     
@@ -27,7 +22,7 @@ local function GlobalSettings()
 end
 
 local function CameraSettings()
-    
+    --@include mfcs/camera_module_core.txt
     local Camera = require("mfcs/camera_module_core.txt")
     local SH = {}; local View = {}
     
@@ -130,7 +125,7 @@ local function CameraSettings()
 end
 
 local function ComputerSettings()
-    
+    --@include mfcs/computer_module_core.txt
     local Computer = require("mfcs/computer_module_core.txt")
     local SH = {}; local System = {}
     
@@ -181,7 +176,7 @@ local function ComputerSettings()
     
     -- # Rangefinding
     
-    SH.LaserRanging = false          // Use trace for ranging ?
+    SH.LaserRanging = true          // Use trace for ranging ?
     
     SH.BattleRange = 100 * 39.37    // Default zeroing range
     
@@ -207,7 +202,7 @@ local function ComputerSettings()
 end
 
 local function GraphicSettings()
-    
+    --@include mfcs/graphic_module_core.txt
     local Graphics = require("mfcs/graphic_module_core.txt")
     local SH = {}
     
@@ -220,13 +215,22 @@ local function GraphicSettings()
     SH.RangefinderScale = 1.0    // Rangefinder texture scale
     
     --[[
-        local Content = require("mfcs_content/official_default.txt")
+        (--)@include mfcs_content/default.txt
+        local Content = require("mfcs_content/default.txt")
+        
         Content:Initialize()
         
-        Lowercase only
-        [ ] spaces replaced with [_] underscores
-        Pass any neccessary parameters in [Content:Initialize]
+        ~ ~ ~
+        
+        local Content = require(string FilePath)
+            Lowercase only
+            [ ] spaces replaced with [_] underscores
+            Also needs to be [@include], same format
+            Pass any neccessary parameters in [Content:Initialize]
     ]]
+    
+    --@include mfcs_content/default.txt
+    local Content = require("mfcs_content/default.txt")
     
     local Settings = {
         C_SightBacklight = Color(50, 200, 50),
@@ -240,7 +244,6 @@ local function GraphicSettings()
         C_LockBacklight = Color(200, 50, 50),
         C_LockBorder = Color(0, 0, 0),
     }
-    local Content = require("mfcs_content/default.txt")
     Content:Initialize(Settings)
     
     local CameraTags = { "all" }

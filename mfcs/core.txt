@@ -1,6 +1,5 @@
 --@name mfcs/Core
 --@author Yours Truly
---@includedir mfcs_interfaces
 
 local NULL = game.getWorld()
 local function Empty() end
