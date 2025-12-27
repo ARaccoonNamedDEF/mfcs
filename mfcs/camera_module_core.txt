@@ -350,7 +350,7 @@ if CLIENT then
         local CurMagnification = 0; local CurFOV = 0
         local IsOpticalRanging = true
         
-        local SwitchView = Empty
+        local SwitchView = Empty; local GetValidViews = Empty
         local SetZoom = Empty; local Zoom = Empty
         
         -- Instance
@@ -371,6 +371,7 @@ if CLIENT then
             local springLim = 0
             local hasMotion = false
             local isSpecial = false
+            local id = #Instances
             
             local parentChecker = MFCS.ESC.Create(NULL)
             
@@ -444,7 +445,7 @@ if CLIENT then
             function view:SetParent(Value)
                 parent = Value
                 parentChecker = MFCS.ESC.Create(Value)
-                hook.add(parentChecker:GetHookName(), "camera-auto_switch", AutoSwitch)
+                hook.add(parentChecker:GetHookName(), string.format("camera-auto_switch-%s", id), AutoSwitch)
             end
             function view:GetParent() return parent end
             
@@ -469,6 +470,11 @@ if CLIENT then
         
         -- Toggle on & off
         function View:SetActive(Active)
+            if Active then
+                SwitchView()
+                if #ValidViews == 0 then return end
+            end
+            
             hook.run(EVENT.VIEW_ACTIVE, Active)
         end
         
@@ -515,12 +521,8 @@ if CLIENT then
         -- Switch perspective based on index
         function SwitchView(Slot)
             IsOpticalRanging = false
-            table.empty(ValidViews)
-            for _, view in ipairs(Instances) do
-                if not view:GetIsUsable() or view:GetIsSpecial() then continue end
-                table.insert(ValidViews, view)
-            end
             
+            GetValidViews()
             if #ValidViews == 0 then
                 View:SetActive(false)
                 return
@@ -530,8 +532,19 @@ if CLIENT then
             ValidViews[ViewIndex]:MakeActive()
         end
         
+        -- Update entries in ValidViews
+        function GetValidViews()
+            table.empty(ValidViews)
+            for _, view in ipairs(Instances) do
+                if not view:GetIsUsable() or view:GetIsSpecial() then continue end
+                table.insert(ValidViews, view)
+            end
+        end
+        
         -- Set magnification
         function SetZoom(Slot)
+            if table.isEmpty(LiveView) then return end
+            
             MagIndex = math.clamp(Slot or MagIndex, 1, #LiveView.Magnification)
             
             CurMagnification = LiveView.Magnification[MagIndex]
@@ -559,10 +572,8 @@ if CLIENT then
             end
             
             local memory = Manager:GetMainCord().Data.Persist.View
-            if table.isEmpty(memory) then
-                SwitchView()
-                return
-            end
+            
+            if table.isEmpty(memory) then return end
             
             SwitchView(memory.ViewIndex)
             SetZoom(memory.ZoomLevel)

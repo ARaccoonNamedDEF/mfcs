@@ -19,7 +19,10 @@ MFCS.EVENT.CORD_RECEIVE_IMMEDIATE = "mfcs-cord_receive_immediate"
 
 -- Shared definitions
 do
-    function MFCS:SetSettings(Value) Settings = Value end
+    function MFCS:SetSettings(Value)
+        Settings = Value
+        Settings.UseHUDComponent = Value.UseHUDComponent or false
+    end
     
     function MFCS:GetTraceRange() return Settings.TraceRange end
     
@@ -234,6 +237,7 @@ if SERVER then
             
             hook.add("PlayerEnteredVehicle", "mfcs-driver_in", function(Ply, Chair) OnEnterChair(Ply, Chair, true) end)
             hook.add("PlayerLeaveVehicle", "mfcs-driver_out", function(Ply, Chair) OnEnterChair(Ply, Chair, false) end)
+            hook.add("DupeFinished", "mfcs-reset", function() restart() end)
             timer.create("mfcs-ping_driver", 1 / Settings.NetworkRate, 0, OnPingDriver)
         end
         
@@ -451,7 +455,8 @@ if CLIENT then
     -- >> Manager [CL]; it manages things
     do
         local LogicRate = 0
-        local SetActive = Empty; local OnPingServer = Empty
+        local SetActive = Empty
+        local OnHUDToggle = Empty; local OnPingServer = Empty
         
         local svMain = MFCS:CreateCord("Core_Main")
         svMain.Data = {
@@ -462,10 +467,13 @@ if CLIENT then
         function Manager:Initialize()
             LogicRate = 1 / Settings.RefreshRate
             Cord:Initialize()
+            
+            hook.add("HUDConnected", "mfcs-hud_connect", function() OnHUDToggle(true) end)
+            hook.add("HUDDisconnected", "mfcs-hud_disconnect", function() OnHUDToggle(false) end)
         end
         
         function Manager:Authorize()
-            SetActive()
+            if svMain.Data.Active then SetActive() end
             timer.create("mfcs-ping_server", 1 / Settings.NetworkRate, 0, OnPingServer)
             
             hook.run(MFCS.EVENT.AUTHORIZE)
@@ -473,13 +481,13 @@ if CLIENT then
         
         -- Entering or leaving vehicle
         svMain.OnReceive = function()
-            enableHud(player(), svMain.Data.Active)
+            if not Settings.UseHUDComponent then
+                enableHud(player(), svMain.Data.Active)
+            end
+            
             ELIST:SetEntities(svMain.Data.Connections)
             
-            if svMain.Data.Active and not MFCS.GetReady() then
-                Requestor:SendRequest()
-                return
-            end
+            if svMain.Data.Active and not MFCS.GetReady() then return end
             
             SetActive()
         end
@@ -495,6 +503,10 @@ if CLIENT then
             end
             
             Keys:SetLogging(svMain.Data.Active)
+        end
+        
+        function OnHUDToggle(Active)
+            if Active then Requestor:SendRequest() end
         end
         
         function OnPingServer()
