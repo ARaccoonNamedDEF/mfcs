@@ -282,8 +282,10 @@ if SERVER then
         local Inputs = {}; local InputTypes = {}; local InputLookup = {}
         local Outputs = {}; local OutputTypes = {}; local OutputLookup = {}
         
+        local RunFilter = Empty
+        
         function Assembly:Initialize()
-            ELIST:SetEntities(chip():getAllConstrained())
+            ELIST:SetEntities( RunFilter(chip():getAllConstrained()) )
         end
         
         -- Execute final io creation
@@ -310,6 +312,22 @@ if SERVER then
             table.insert(Outputs, Name)
             table.insert(OutputTypes, Type)
             return true
+        end
+        
+        -- Filter out entities from constraints
+        function RunFilter(ConnectionList)
+            local filter = {
+                gmod_wire_hologram = true,
+                starfall_hologram = true,
+            }
+            
+            local filteredList = {}
+            for _, connection in ipairs(ConnectionList) do
+                if filter[connection:getClass()] then continue end
+                table.insert(filteredList, connection)
+            end
+            
+            return filteredList
         end
     end
     
