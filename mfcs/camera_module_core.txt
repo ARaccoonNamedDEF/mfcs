@@ -8,8 +8,39 @@ local Settings = {}; local Module = {}
 local Manager = {}
 local View = {}
 
+local Cord = MFCS:GetCord()
+local DriverCord; local ViewCord; local PersistCord;
+
+-- Common cords
+do
+    local Vars = {
+        Active = false,
+    }
+    DriverCord = Cord.CreateCord("mfcs-camera-driver")
+    DriverCord:AddFromTable(Vars)
+    
+    local Vars = {
+        Parents = {},
+    }
+    ViewCord = Cord.CreateCord("mfcs-camera-view")
+    ViewCord:AddFromTable(Vars)
+    
+    local Vars = {
+        Cam_ViewIndex = 1,
+        Cam_ZoomLevel = 1,
+        Ori_TargetPos = Vector(),
+        Ori_ViewWorld = Angle(0, 0, 0),
+        Ori_AimWorld = Angle(0, 0, 0),
+        Ori_AimDir = Vector(1, 0, 0),
+        Ori_Mode = 1,
+    }
+    PersistCord = Cord.CreateCord("mfcs-camera-persist")
+    PersistCord:AddFromTable(Vars)
+end
+
 if SERVER then
     local ViewSpring = {}
+    local MainChannel = Cord.CreateChannel()
     
     -- >> Setup functions
     do
@@ -28,18 +59,8 @@ if SERVER then
     -- >> Manager; guess what this bad-boy does
     do
         local Cycle = 0
+        
         local OnBoard = Empty; local OnLogicTick = Empty
-        
-        local shMain = MFCS:CreateCord("Camera_Main")
-        
-        shMain.Data = {
-            Active = false,
-            View = {},
-            Persist = {
-                View = {},
-                Orientor = {},
-            },
-        }
         
         function Manager:Initialize()
             ViewSpring:Initialize()
@@ -59,13 +80,15 @@ if SERVER then
         
         -- Send info to driver
         function OnBoard(Player, Board)
-            shMain.Data.Active = Board
+            DriverCord:SetVarKey("Active", Board)
+            DriverCord:Queue(MainChannel)
             
             if Board then
+                PersistCord:Queue(MainChannel)
                 View:SendParents()
             end
             
-            shMain:SendImmediate(Player)
+            MainChannel:SendAll(Player)
         end
         
         -- # Passthroughs
@@ -77,10 +100,6 @@ if SERVER then
             ViewSpring:UpdateHolo()
             Cycle = 0
         end
-        
-        -- # Accessors
-        
-        function Manager:GetMainCord() return shMain end
     end
     
     -- >> View [SV/pseudo-class]; data container for perspective
@@ -136,7 +155,9 @@ if SERVER then
             for _, view in ipairs(Instances) do
                 table.insert(parents, view:GetParent())
             end
-            Manager:GetMainCord().Data.View.Parents = parents
+            
+            ViewCord:SetVarKey("Parents", parents)
+            ViewCord:Queue(MainChannel)
         end
     end
     
@@ -220,6 +241,8 @@ if CLIENT then
     local Orientor = {}; local ViewUnit = {}
     local GyroCamera = {}; local RelativeCamera = {}; local TrackCamera = {}
     
+    local MainChannel = Cord.CreateChannel()
+    
     local EVENT = {
         VIEW_ACTIVE = "mfcs-camera-view-active"
     }
@@ -254,17 +277,6 @@ if CLIENT then
         local OnCameraSwitch = Empty; local OnCameraZoom = Empty
         local OnViewActive = Empty
         
-        local shMain = MFCS:CreateCord("Camera_Main")
-        
-        shMain.Data = {
-            Active = false,
-            View = {},
-            Persist = {
-                View = {},
-                Orientor = {},
-            },
-        }
-        
         function Manager:Initialize()
             MFCS:AddSharedOutput("Angles", "Angle")
             MFCS:AddSharedOutput("HitPos", "Vector")
@@ -295,7 +307,7 @@ if CLIENT then
             SetActive()
         end
         
-        shMain.OnReceive = function()
+        DriverCord.OnReceive = function()
             if not MFCS.GetReady() then return end
             SetActive()
         end
@@ -303,15 +315,18 @@ if CLIENT then
         -- # Passthroughs
         
         function SetActive()
-            if shMain.Data.Active then
+            if DriverCord:GetVarKey("Active") then
                 View:Load()
                 Orientor:Load()
             else
+                MainChannel:Dump()
                 View:Save()
                 Orientor:Save()
-                shMain:SendImmediate()
+                PersistCord:Queue(MainChannel)
+                MainChannel:SendAll()
             end
-            View:SetActive(shMain.Data.Active)
+            
+            View:SetActive(DriverCord:GetVarKey("Active"))
         end
         
         function OnUserKey(Key, Down)
@@ -335,10 +350,6 @@ if CLIENT then
             ViewUnit:SetFOV(View:GetCurFOV())
             Orientor:SetSensitivity(Settings.MouseSensitivity / View:GetCurMagnification())
         end
-        
-        -- # Accessors
-        
-        function Manager:GetMainCord() return shMain end
     end
     
     -- >> View [CL/pseudo-class]; data container for perspective
@@ -562,7 +573,7 @@ if CLIENT then
         
         function View:Load()
             for k, view in ipairs(Instances) do
-                view:SetParent(Manager:GetMainCord().Data.View.Parents[k])
+                view:SetParent(ViewCord:GetVarKey("Parents")[k])
             end
             
             local rfv = Lookup["rangefinder"]
@@ -571,19 +582,13 @@ if CLIENT then
                 MFCS.Graphic:SetupRangefinder(rfv:GetParent(), rfv.Alignment, rfv.Left, rfv.Right)
             end
             
-            local memory = Manager:GetMainCord().Data.Persist.View
-            
-            if table.isEmpty(memory) then return end
-            
-            SwitchView(memory.ViewIndex)
-            SetZoom(memory.ZoomLevel)
+            SwitchView(PersistCord:GetVarKey("Cam_ViewIndex"))
+            SetZoom(PersistCord:GetVarKey("Cam_ZoomLevel"))
         end
         
         function View:Save()
-            Manager:GetMainCord().Data.Persist.View = {
-                ViewIndex = ViewIndex,
-                ZoomLevel = MagIndex,
-            }
+            PersistCord:SetVarKey("Cam_ViewIndex", ViewIndex)
+            PersistCord:SetVarKey("Cam_ZoomLevel", MagIndex)
         end
         
         -- # Accessors
@@ -768,26 +773,19 @@ if CLIENT then
         -- # Serialization
         
         function Orientor:Load()
-            local memory = Manager:GetMainCord().Data.Persist.Orientor
-            if table.isEmpty(memory) then return end
-            
-            TargetPos = memory.TargetPos
-            ViewWorld = memory.ViewWorld
-            AimAng = memory.AimAng
-            AimWorld = memory.AimWorld
-            AimDir = memory.AimDir
-            self:SetMode(memory.Mode)
+            TargetPos = PersistCord:GetVarKey("Ori_TargetPos")
+            ViewWorld = PersistCord:GetVarKey("Ori_ViewWorld")
+            AimWorld = PersistCord:GetVarKey("Ori_AimWorld")
+            AimDir = PersistCord:GetVarKey("Ori_AimDir")
+            self:SetMode(PersistCord:GetVarKey("Ori_Mode"))
         end
         
         function Orientor:Save()
-            Manager:GetMainCord().Data.Persist.Orientor = {
-                TargetPos = TargetPos,
-                ViewWorld = ViewWorld,
-                AimAng = AimAng,
-                AimWorld = AimWorld,
-                AimDir = AimDir,
-                Mode = CurrentMode,
-            }
+            PersistCord:SetVarKey("Ori_TargetPos", TargetPos)
+            PersistCord:SetVarKey("Ori_ViewWorld", ViewWorld)
+            PersistCord:SetVarKey("Ori_AimWorld", AimWorld)
+            PersistCord:SetVarKey("Ori_AimDir", AimDir)
+            PersistCord:SetVarKey("Ori_Mode", CurrentMode)
         end
         
         -- # Accessors

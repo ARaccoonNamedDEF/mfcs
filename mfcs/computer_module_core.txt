@@ -8,7 +8,40 @@ local Settings = {}; local Module = {}
 local Manager = {}
 local Armament = {}; local Munition = {}
 
+local Cord = MFCS:GetCord()
+local DriverCord; local BallisticCord; local PersistCord; local ArmamentCord;
+
+-- Common cords
+do
+    local Vars = {
+        Active = false,
+    }
+    DriverCord = Cord.CreateCord("mfcs-computer-driver")
+    DriverCord:AddFromTable(Vars)
+    
+    local Vars = {
+        BallisticData = {},
+    }
+    BallisticCord = Cord.CreateCord("mfcs-computer-ballistic")
+    BallisticCord:AddFromTable(Vars)
+    
+    local Vars = {
+        Parents = {},
+    }
+    ArmamentCord = Cord.CreateCord("mfcs-computer-armament")
+    ArmamentCord:AddFromTable(Vars)
+    
+    local Vars = {
+        Munition = {},
+        Rangefinder = {},
+    }
+    PersistCord = Cord.CreateCord("mfcs-computer-persist")
+    PersistCord:AddFromTable(Vars)
+end
+
 if SERVER then
+    local MainChannel = Cord.CreateChannel()
+    local RefreshChannel = Cord.CreateChannel()
     
     -- >> Setup functions
     do
@@ -24,19 +57,8 @@ if SERVER then
     
     -- >> Manager [SV]; it manages things
     do
-        local OnBoard = Empty
+        local OnBoard = Empty; local OnPingDriver = Empty
         local OnOwnerReady = Empty; local OnBallisticData = Empty
-        
-        local shMain = MFCS:CreateCord("Computer_Main")
-        shMain.Data = {
-            Active = false,
-            Persist = {
-                Rangefinder = {},
-                Munition = {},
-            },
-            Armament = {},
-            BallisticData = {},
-        }
         
         function Manager:Initialize()
             Munition:Initialize()
@@ -46,6 +68,7 @@ if SERVER then
             net.receive("mfcs_computer-ballistics_build", OnBallisticData)
             net.receive("mfcs_computer-ammo_select", function() Armament:SelectFeed() end)
             hook.add(MFCS.EVENT.BOARD_VEHICLE, "computer_mng-board", OnBoard)
+            hook.add(MFCS.EVENT.PING_DRIVER, "computer_mng-ping_driver", OnPingDriver)
         end
         
         function Manager:MakeIO()
@@ -53,18 +76,28 @@ if SERVER then
             MFCS.AddOutput("BallisticData", "Table")
         end
         
-        -- Send info to driver
+        -- # Passthroughs
+        
         function OnBoard(Player, Board)
-            shMain.Data.Active = Board
+            DriverCord:SetVarKey("Active", Board)
+            
+            DriverCord:Queue(MainChannel)
+            PersistCord:Queue(MainChannel)
+            BallisticCord:Queue(MainChannel)
             
             if Board then
                 Armament:SendParents()
             end
             
-            shMain:SendImmediate(Player)
+            MainChannel:SendAll(Player)
         end
         
-        -- # Passthroughs
+        function OnPingDriver()
+            RefreshChannel:Dump()
+            Armament:UpdateNetworked()
+            Munition:UpdateNetworked()
+            RefreshChannel:SendAll(MFCS:GetDriver())
+        end
         
         function OnOwnerReady()
             net.start("mfcs_computer-munition_data")
@@ -73,13 +106,9 @@ if SERVER then
         end
         
         function OnBallisticData()
-            shMain.Data.BallisticData = net.readTable()
-            wire.ports.BallisticData = shMain.Data.BallisticData
+            BallisticCord:SetVarKey("BallisticData", net.readTable())
+            wire.ports.BallisticData = BallisticCord:GetVarKey("BallisticData")
         end
-        
-        -- # Accessors
-        
-        function Manager:GetNW() return shMain.Data end
     end
     
     -- >> Armament [SV/pseudo-class]; weapon data
@@ -101,10 +130,7 @@ if SERVER then
             local munitions = {}
             local payloadLookup = {}
             
-            local svCord = MFCS:CreateCord("SV_Armament-" .. ParentName)
-            local clCord = MFCS:CreateCord("CL_Armament-" .. ParentName)
-            
-            svCord.Data = {
+            local vars = {
                 Ready = true,
                 Payload = "Empty",
                 State = "Empty",
@@ -114,9 +140,18 @@ if SERVER then
                 MagSize = 1,
                 RelativeVel = Vector(0, 0, 0),
             }
-            clCord.Data = {
+            local stateCord = Cord.CreateCord(string.format("mfcs-computer-armament_state_%s", ParentName))
+            stateCord:AddFromTable(vars)
+            
+            local vars = {
                 Calibration = Vector(0, 0, 0),
             }
+            local dropCord = Cord.CreateCord(string.format("mfcs-computer-armament_drop_%s", ParentName))
+            dropCord:AddFromTable(vars)
+            
+            dropCord.OnReceive = function()
+                wire.ports[aimName] = wire.readOutput(chip(), "AimPos") + dropCord:GetVarKey("Calibration")
+            end
             
             -- Spawn alignment holo
             local function SpawnAlignHolo()
@@ -146,29 +181,6 @@ if SERVER then
                 return "Empty"
             end
             
-            -- Update networked data
-            local function UpdateNetworked()
-                if not weapon:isValid() then return end
-                
-                svCord.Data.Ready = weapon:acfReady()
-                svCord.Data.Payload = GetPayload()
-                svCord.Data.State = weapon:acfState()
-                svCord.Data.ReloadProgress = weapon:acfReloadProgress()
-                svCord.Data.ReloadTime = weapon:acfReloadTime()
-                svCord.Data.MagRounds = weapon:acfMagRounds()
-                
-                svCord.Data.RelativeVel = Vector(0, 0, 0)
-                if telemetryEnt:isValid() then
-                    svCord.Data.RelativeVel = telemetryEnt:getVelocity():getRotated(-holo:getAngles()) / 39.37
-                end
-                
-                svCord:Queue()
-            end
-            
-            clCord.OnReceive = function()
-                wire.ports[aimName] = wire.readOutput(chip(), "AimPos") + clCord.Data.Calibration
-            end
-            
             -- # Methods
             
             -- Add munition to this system
@@ -188,10 +200,9 @@ if SERVER then
                     munitions[name]:Bypass()
                 end
                 
-                hook.add(MFCS.EVENT.PING_DRIVER, "computer_armament-sv_" .. ParentName, UpdateNetworked)
-                
                 if not weapon:isValid() then return end
-                svCord.Data.MagSize = weapon:acfMagSize()
+                
+                stateCord:SetVarKey("MagSize", weapon:acfMagSize())
                 SpawnAlignHolo()
                 FindVelocityParent()
             end
@@ -203,6 +214,25 @@ if SERVER then
                 for _, munition in pairs(munitions) do
                     munition:MakeIO()
                 end
+            end
+            
+            -- Update networked data
+            function armament:UpdateNetworked()
+                if not weapon:isValid() then return end
+                
+                stateCord:SetVarKey("Ready", weapon:acfReady())
+                stateCord:SetVarKey("Payload", GetPayload())
+                stateCord:SetVarKey("State", weapon:acfState())
+                stateCord:SetVarKey("ReloadProgress", weapon:acfReloadProgress())
+                stateCord:SetVarKey("ReloadTime", weapon:acfReloadTime())
+                stateCord:SetVarKey("MagRounds", weapon:acfMagRounds())
+                
+                stateCord:SetVarKey("RelativeVel", Vector(0, 0, 0))
+                if telemetryEnt:isValid() then
+                    stateCord:SetVarKey("RelativeVel", telemetryEnt:getVelocity():getRotated(-holo:getAngles()) / 39.37)
+                end
+                
+                stateCord:Queue(RefreshChannel)
             end
             
             -- Set outputs so only selected munition feeds
@@ -247,7 +277,16 @@ if SERVER then
             for k, armament in pairs(Instances) do
                 parents[k] = armament:GetParent()
             end
-            Manager:GetNW().Armament = { Parents = parents }
+            
+            ArmamentCord:SetVarKey("Parents", parents)
+            ArmamentCord:Queue(MainChannel)
+        end
+        
+        -- Update info
+        function Armament:UpdateNetworked()
+            for k, armament in pairs(Instances) do
+                armament:UpdateNetworked()
+            end
         end
         
         -- Toggle ammo crates for specific weapon
@@ -273,10 +312,11 @@ if SERVER then
             local crates = {}
             local bypassed = false
             
-            local svCord = MFCS:CreateCord("SV_Munition-" .. codeName)
-            svCord.Data = {
+            local vars = {
                 AmmoCount = 0,
             }
+            local stateCord = Cord.CreateCord(string.format("mfcs-computer-munition_%s", codeName))
+            stateCord:AddFromTable(vars)
             
             -- Get ammo counts from crate entities
             local function GetAmmoCount()
@@ -302,12 +342,6 @@ if SERVER then
                 crates = newCrates
             end
             
-            -- Update networked data
-            local function UpdateNetworked()
-                svCord.Data.AmmoCount = GetAmmoCount()
-                svCord:Queue()
-            end
-            
             function munition:Initialize()
                 wire.ports[codeName] = 0
                 
@@ -324,12 +358,16 @@ if SERVER then
                     muzzleVel = crates[1]:acfMuzzleVel()
                     dragCoef = crates[1]:acfDragCoef()
                 end
-                
-                hook.add(MFCS.EVENT.PING_DRIVER, "computer_munition-sv_" .. codeName, UpdateNetworked)
             end
             
             function munition:MakeIO()
                 MFCS.AddOutput(codeName, "Number")
+            end
+            
+            -- Update networked data
+            function munition:UpdateNetworked()
+                stateCord:SetVarKey("AmmoCount", GetAmmoCount())
+                stateCord:Queue(RefreshChannel)
             end
             
             -- Toggle feed
@@ -401,6 +439,13 @@ if SERVER then
             return munitionPkg
         end
         
+        -- Update networked data
+        function Munition:UpdateNetworked()
+            for _, munition in ipairs(Instances) do
+                munition:UpdateNetworked()
+            end
+        end
+        
         -- Find wired ammo crates
         function SortAmmoCrates()
             local candidates = {}
@@ -430,6 +475,9 @@ if CLIENT then
     local FlightUnit = {}; local BuildUnit = {}
     local ThreadUnit = {}
     
+    local MainChannel = Cord.CreateChannel()
+    local RefreshChannel = Cord.CreateChannel()
+    
     local EVENT = {
         BUILD_FINISHED = "build-finished",
     }
@@ -450,23 +498,13 @@ if CLIENT then
     do
         local SetActive = Empty; local OnUserKey = Empty
         
-        local shMain = MFCS:CreateCord("Computer_Main")
-        shMain.Data = {
-            Active = false,
-            Persist = {
-                Rangefinder = {},
-                Munition = {},
-            },
-            Armament = {},
-            BallisticData = {},
-        }
-        
         function Manager:Initialize()
             if player() != owner() then return end
             
             net.start("mfcs_computer-owner_ready")
             net.send()
             
+            hook.add(MFCS.EVENT.PING_SERVER, "mfcs_computer-ping_server", function() Armament:UpdateNetworked() end)
             net.receive("mfcs_computer-munition_data", function() Munition:BuildFlightTables() end)
         end
         
@@ -476,7 +514,7 @@ if CLIENT then
             hook.add(MFCS.EVENT.OPERATOR_SCROLL, "computer_mng-scroll", function(Dir) Rangefinder:Dial(Dir) end)
         end
         
-        shMain.OnReceive = function()
+        DriverCord.OnReceive = function()
             if not MFCS.GetReady() then return end
             SetActive()
         end
@@ -484,14 +522,16 @@ if CLIENT then
         -- # Passthroughs
         
         function SetActive()
-            if shMain.Data.Active then
+            if DriverCord:GetVarKey("Active") then
                 Armament:SetParents()
                 Munition:Load()
                 Rangefinder:Load()
             else
+                MainChannel:Dump()
                 Munition:Save()
                 Rangefinder:Save()
-                shMain:SendImmediate()
+                PersistCord:Queue(MainChannel)
+                MainChannel:SendAll()
             end
         end
         
@@ -501,10 +541,6 @@ if CLIENT then
             Rangefinder:Lase(Key)
             Armament:SwitchMunition(Key)
         end
-        
-        -- # Accessors
-        
-        function Manager:GetMainCord() return shMain end
     end
     
     -- >> Armament [CL/pseudo-class]; weapon assemblies
@@ -529,10 +565,13 @@ if CLIENT then
             local selectedMunition = {}
             local loadedMunition = {}
             
-            local svCord = MFCS:CreateCord("SV_Armament-" .. ParentName)
-            local clCord = MFCS:CreateCord("CL_Armament-" .. ParentName)
+            local reloadTimeLeft = 0
+            local reloadProgress = 0
+            local tof = 0
             
-            svCord.Data = {
+            local IdentifyLoad;
+            
+            local vars = {
                 Ready = true,
                 Payload = "Empty",
                 State = "Empty",
@@ -542,13 +581,20 @@ if CLIENT then
                 MagSize = 1,
                 RelativeVel = Vector(0, 0, 0),
             }
-            clCord.Data = {
+            local stateCord = Cord.CreateCord(string.format("mfcs-computer-armament_state_%s", ParentName))
+            stateCord:AddFromTable(vars)
+            
+            stateCord.OnReceive = function()
+                reloadProgress = stateCord:GetVarKey("ReloadProgress")
+                reloadTimeLeft = math.remap(reloadProgress, 0, 1, stateCord:GetVarKey("ReloadTime"), 0)
+                IdentifyLoad()
+            end
+            
+            local vars = {
                 Calibration = Vector(0, 0, 0),
             }
-            
-            local reloadTimeLeft = 0
-            local reloadProgress = 0
-            local tof = 0
+            local dropCord = Cord.CreateCord(string.format("mfcs-computer-armament_drop_%s", ParentName))
+            dropCord:AddFromTable(vars)
             
             local function GetIsActive()
                 return weapon:isValid() and (all or cameraLookup[MFCS.Camera:GetTag()])
@@ -558,8 +604,8 @@ if CLIENT then
             local function Calibrate()
                 if table.isEmpty(loadedMunition) or not weapon:isValid() then return end
                 
-                calAng, tof = loadedMunition:CalculateFlightTermination( svCord.Data.RelativeVel )
-                clCord.Data.Calibration = (Vector(1, 0, 0) - calAng:getForward()) * MFCS.Computer:GetRange()
+                calAng, tof = loadedMunition:CalculateFlightTermination( stateCord:GetVarKey("RelativeVel") )
+                dropCord:SetVarKey("Calibration", (Vector(1, 0, 0) - calAng:getForward()) * MFCS.Computer:GetRange())
             end
             
             -- Select a munition, deselect other
@@ -576,12 +622,12 @@ if CLIENT then
             end
             
             -- Check loaded munition & broadcast when different
-            local function IdentifyLoad()
+            function IdentifyLoad()
                 local lastLoaded = loadedMunition
                 
                 loadedMunition = {}
                 for k, munition in pairs(munitions) do
-                    if svCord.Data.Payload != k then
+                    if stateCord:GetVarKey("Payload") != k then
                         munition:SetLoaded(false)
                         continue
                     end
@@ -597,17 +643,11 @@ if CLIENT then
             local function UpdatePeriodic()
                 reloadTimeLeft = math.max(reloadTimeLeft - MFCS:GetTimeStep(), 0)
                 
-                if svCord.Data.State == "Loading" then
-                    reloadProgress = math.remap(reloadTimeLeft, 0, svCord.Data.ReloadTime, 1, 0)
+                if stateCord:GetVarKey("State") == "Loading" then
+                    reloadProgress = math.remap(reloadTimeLeft, 0, stateCord:GetVarKey("ReloadTime"), 1, 0)
                 end
 
                 Calibrate()
-            end
-            
-            svCord.OnReceive = function()
-                reloadProgress = svCord.Data.ReloadProgress
-                reloadTimeLeft = math.remap(reloadProgress, 0, 1, svCord.Data.ReloadTime, 0)
-                IdentifyLoad()
             end
             
             -- # Methods
@@ -651,13 +691,17 @@ if CLIENT then
                 
                 local objID = "mfcs_computer_armament-" .. ParentName
                 hook.add(MFCS.EVENT.LOGIC_TICK, objID, UpdatePeriodic)
-                hook.add(MFCS.EVENT.PING_SERVER, objID, function() clCord:Queue() end)
             end
             
             -- Select ammo
             function armament:SelectMunition(Key)
                 if not (GetIsActive() and munitionLookup[Key]) then return end
                 SelectMunition(munitionLookup[Key])
+            end
+            
+            -- Update networked data
+            function armament:UpdateNetworked()
+                dropCord:Queue(RefreshChannel)
             end
             
             -- #  Accessors
@@ -676,23 +720,23 @@ if CLIENT then
             
             function armament:GetUpdateHook() return updateHook end
             
-            function armament:GetReady() return svCord.Data.Ready end
+            function armament:GetReady() return stateCord:GetVarKey("Ready") end
             
-            function armament:GetState() return svCord.Data.State end
+            function armament:GetState() return stateCord:GetVarKey("State") end
             
             function armament:GetReloadProgress() return reloadProgress end
             
-            function armament:GetReloadTime() return svCord.Data.ReloadTime end
+            function armament:GetReloadTime() return stateCord:GetVarKey("ReloadTime") end
             
             function armament:GetReloadTimeLeft() return reloadTimeLeft end
             
-            function armament:GetMagRounds() return svCord.Data.MagRounds end
+            function armament:GetMagRounds() return stateCord:GetVarKey("MagRounds") end
             
-            function armament:GetMagSize() return svCord.Data.MagSize end
+            function armament:GetMagSize() return stateCord:GetVarKey("MagSize") end
             
             function armament:GetTOF() return tof end
             
-            function armament:GetPayload() return svCord.Data.Payload end
+            function armament:GetPayload() return stateCord:GetVarKey("Payload") end
             
             function armament:GetOrderedMunitions() return orderedMunitions end
             
@@ -703,7 +747,7 @@ if CLIENT then
         -- Get parents from server
         function Armament:SetParents()
             for k, armament in pairs(Instances) do
-                armament:SetParent(Manager:GetMainCord().Data.Armament.Parents[k])
+                armament:SetParent(ArmamentCord:GetVarKey("Parents")[k])
                 armament:Setup()
             end
         end
@@ -713,6 +757,14 @@ if CLIENT then
             for k, armament in pairs(Instances) do
                 armament:SelectMunition(Key)
             end
+        end
+        
+        function Armament:UpdateNetworked()
+            for k, armament in pairs(Instances) do
+                armament:UpdateNetworked()
+            end
+            
+            RefreshChannel:SendAll()
         end
         
         -- #  Accessors
@@ -736,10 +788,11 @@ if CLIENT then
             local loaded = false
             local maxRange = 0
             
-            local svCord = MFCS:CreateCord("SV_Munition-" .. codeName)
-            svCord.Data = {
+            local vars = {
                 AmmoCount = 0,
             }
+            local stateCord = Cord.CreateCord(string.format("mfcs-computer-munition_%s", codeName))
+            stateCord:AddFromTable(vars)
             
             -- # Methods
             
@@ -777,7 +830,7 @@ if CLIENT then
             
             function munition:GetMaxRange() return maxRange end
             
-            function munition:GetAmmoCount() return svCord.Data.AmmoCount end
+            function munition:GetAmmoCount() return stateCord:GetVarKey("AmmoCount") end
             
             function munition:GetSelected() return selected end
             function munition:SetSelected(Value) selected = Value end
@@ -825,15 +878,14 @@ if CLIENT then
         -- # Serialization
         
         function Munition:Load()
-            for k, data in pairs(Manager:GetMainCord().Data.BallisticData) do
+            for k, data in pairs(BallisticCord:GetVarKey("BallisticData")) do
                 Instances[k]:SetFlightData(data)
             end
             
-            local memory = Manager:GetMainCord().Data.Persist.Munition
-            if table.isEmpty(memory) then return end
+            if table.isEmpty(PersistCord:GetVarKey("Munition")) then return end
             
             for k, munition in pairs(Instances) do
-                munition:SetSelected(memory[k].Selected)
+                munition:SetSelected(PersistCord:GetVarKey("Munition")[k].Selected)
             end
         end
         
@@ -845,7 +897,7 @@ if CLIENT then
                 }
             end
             
-            Manager:GetMainCord().Data.Persist.Munition = memory
+            PersistCord:SetVarKey("Munition", memory)
         end
     end
     
@@ -968,27 +1020,30 @@ if CLIENT then
         -- # Serialization
         
         function Rangefinder:Load()
-            local memory = Manager:GetMainCord().Data.Persist.Rangefinder
-            if table.isEmpty(memory) then
+            if table.isEmpty(PersistCord:GetVarKey("Rangefinder")) then
                 SetRange(Settings.BattleRange)
                 return
             end
             
             SetManualRanging(false)
+            
+            if table.isEmpty(PersistCord:GetVarKey("Rangefinder")) then return end
 
-            SetRange(memory.Range)
+            SetRange(PersistCord:GetVarKey("Rangefinder").Range)
             //SetManualRanging(memory.IsManualRanging)
-            Locked = memory.Locked
-            Position = memory.Position
+            Locked = PersistCord:GetVarKey("Rangefinder").Locked
+            Position = PersistCord:GetVarKey("Rangefinder").Position
         end
         
         function Rangefinder:Save()
-            Manager:GetMainCord().Data.Persist.Rangefinder = {
+            local memory = {
                 Range = Range,
                 //IsManualRanging = IsManualRanging,
                 Locked = Locked,
                 Position = Position,
             }
+            
+            PersistCord:SetVarKey("Rangefinder", memory)
         end
         
         -- # Accessors

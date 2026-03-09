@@ -7,6 +7,8 @@ local function Empty() end
 local Settings = {}; local Module = {}
 local Manager = {}
 
+local API;
+
 -- >> Definitions
 do
     function Module:AddGraphic()
@@ -29,6 +31,18 @@ do
     function MFCS:GetGraphicsModule() return Module end
 end
 
+local Cord = MFCS:GetCord()
+local DriverCord;
+
+-- Common cords
+do
+    local Vars = {
+        Active = false,
+    }
+    DriverCord = Cord.CreateCord("mfcs-graphics-driver")
+    DriverCord:AddFromTable(Vars)
+end
+
 if SERVER then
     
     -- >> Setup functions
@@ -44,23 +58,20 @@ if SERVER then
     do
         local OnBoard = Empty
         
-        local svMain = MFCS:CreateCord("Graphics_Main")
-        svMain.Data = { Active = false }
-        
         function Manager:Initialize()
             hook.add(MFCS.EVENT.BOARD_VEHICLE, "graphics_mng-board", OnBoard)
         end
         
         -- Send info to driver
         function OnBoard(Player, Board)
-            svMain.Data.Active = Board
-            svMain:SendImmediate(Player)
+            DriverCord:SetVarKey("Active", Board)
+            DriverCord:SendImmediate(Player)
         end
     end
 end
 
 if CLIENT then
-    local API = {}
+    API = {}
     local Renderer = {}; local Graphic = {}
     local Rangefinder = {}
     local StencilUnit = {}; local RVU = {}
@@ -86,10 +97,8 @@ if CLIENT then
     -- >> Manager [CL]; it manages things
     do
         local SetActive = Empty
-        local OnCordReceive = Empty; local OnLogicTick = Empty
-        
-        local svMain = MFCS:CreateCord("Graphics_Main")
-        svMain.Data = { Active = false }
+        local OnLogicTick = Empty
+        local OnPingServer = Empty
         
         function Manager:Initialize()
             MFCS.AddPermission("hologram.create")
@@ -108,13 +117,12 @@ if CLIENT then
             API.OnAuthorize()
             
             hook.add(MFCS.EVENT.LOGIC_TICK, "graphics_mng-ev_frame", OnLogicTick)
-            hook.add(MFCS.EVENT.CORD_RECEIVE, "graphics_mng-ev_net_get", OnCordReceive)
-            hook.add(MFCS.EVENT.PING_SERVER, "graphics_mng-ev_net_send", function() API.OnSendNet() end)
+            hook.add(MFCS.EVENT.PING_SERVER, "graphics_mng-ev_net_send", OnPingServer)
             hook.add(MFCS.EVENT.CAMERA_SWITCH, "graphics_mng-rangefinder_toggle", function() Rangefinder:Toggle() end)
             hook.add(MFCS.EVENT.OPERATOR_KEY, "graphics_mng-on_key", function(Key, Down) API.OnKey(Key, Down) end)
         end
         
-        svMain.OnReceive = function()
+        DriverCord.OnReceive = function()
             if not MFCS.GetReady() then return end
             SetActive()
         end
@@ -122,25 +130,27 @@ if CLIENT then
         -- # Passthroughs
         
         function SetActive()
-            if svMain.Data.Active then
+            if DriverCord:GetVarKey("Active") then
                 API.OnEnterChair()
             else
                 API.OnExitChair()
             end
-            Renderer:SetActive(svMain.Data.Active)
-            Graphic:SetActive(svMain.Data.Active)
-            Rangefinder:SetActive(svMain.Data.Active)
-        end
-        
-        function OnCordReceive()
-            hook.run(Module.UPDATE.NETWORK)
-            API.OnReceiveNet()
+            
+            Renderer:SetActive(DriverCord:GetVarKey("Active"))
+            Graphic:SetActive(DriverCord:GetVarKey("Active"))
+            Rangefinder:SetActive(DriverCord:GetVarKey("Active"))
         end
         
         function OnLogicTick()
             hook.run(Module.UPDATE.FRAME)
             Renderer:ComputeBudget()
             API.OnUpdate()
+        end
+        
+        function OnPingServer()
+            hook.run(Module.UPDATE.NETWORK)
+            API.OnReceiveNet()
+            API.OnSendNet()
         end
     end
     

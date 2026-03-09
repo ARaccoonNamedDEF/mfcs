@@ -5,19 +5,19 @@ local NULL = game.getWorld()
 local function Empty() end
 
 MFCS = {}
+MFCS.EVENT = {}
+
 local Settings = {}
 local PingPeriod = 0.210
+
+local Assembly;
+local Operator;
 
 local Manager = {}
 local ESC = {}; local ELIST = {}
 local Cord = {}; local EXIO = {}
 
-MFCS.EVENT = {}
-
-MFCS.EVENT.CORD_RECEIVE = "mfcs-cord_receive"
-MFCS.EVENT.CORD_RECEIVE_IMMEDIATE = "mfcs-cord_receive_immediate"
-
--- Shared definitions
+-- Global methods, definitions
 do
     function MFCS:SetSettings(Value)
         Settings = Value
@@ -28,11 +28,14 @@ do
     
     function MFCS:GetRefreshRate() return Settings.RefreshRate end
     
-    function MFCS:CreateCord(ID) return Cord.Create(ID) end
-    
     function MFCS:AddSharedInput(Name, Type) EXIO:AddInput(Name, Type) end
     
     function MFCS:AddSharedOutput(Name, Type) EXIO:AddOutput(Name, Type) end
+    
+    function MFCS:GetInput(Name) return EXIO:GetInput(Name) end
+    
+    function MFCS:GetOutput(Name) return EXIO:GetOutput(Name) end
+    function MFCS:SetOutput(Name, Value) EXIO:SetOutput(Name, Value) end
     
     function MFCS:GetHoloModel() return "models/props_combine/breenbust.mdl" end
     
@@ -40,6 +43,42 @@ do
         local tab = {}
         function tab:GetAPI() end
         return tab
+    end
+    
+    function MFCS:GetCord() return Cord end
+    
+    if SERVER then
+        function MFCS:GetDriver() return Operator:GetDriver() end
+    end
+end
+
+-- Events
+do
+    local function Mark(Str)
+        return string.format("mfcs-%s", Str)
+    end
+    
+    if SERVER then
+        MFCS.EVENT.INITIALIZE = Mark("initialize")
+        MFCS.EVENT.MAKE_IO = Mark("make_io")
+        MFCS.EVENT.BOARD_VEHICLE = Mark("board_vehicle")
+        MFCS.EVENT.PING_DRIVER = Mark("ping_driver")
+    end
+    
+    if CLIENT then
+        MFCS.EVENT.AUTHORIZE = Mark("authorize")
+        //MFCS.EVENT.CORD_RECEIVE = Mark("cord_receive")
+        MFCS.EVENT.OPERATOR_KEY = Mark("operator_key")
+        MFCS.EVENT.OPERATOR_SCROLL = Mark("operator_scroll")
+        MFCS.EVENT.PING_SERVER = Mark("ping_server")
+        MFCS.EVENT.LOGIC_TICK = Mark("logic_tick")
+        MFCS.EVENT.CAMERA_AIM = Mark("camera-aim")
+        MFCS.EVENT.CAMERA_ZOOM = Mark("camera-zoom")
+        MFCS.EVENT.CAMERA_SWITCH = Mark("camera-switch")
+        MFCS.EVENT.COMPUTER_RANGE = Mark("computer-range")
+        MFCS.EVENT.COMPUTER_MANUAL_RANGING = Mark("computer-manual_ranging")
+        MFCS.EVENT.COMPUTER_OPTICAL_RANGING = Mark("computer-optical_ranging")
+        MFCS.EVENT.COMPUTER_LOCK = Mark("computer-lock")
     end
 end
 
@@ -139,77 +178,457 @@ end
 
 -- >> Cord [pseudo-class]; networked table
 do
+    Cord.OnReceive = Empty
+    
     local Instances = {}; local Queue = {}
-    local SendImmediate = Empty
+    local HookName = ""
+    local HookImmediateName = ""
+    
+    local CordList = {}
+    local ChannelList = {}
+    
     local OnReceive = Empty; local OnReceiveImmediate = Empty
     
-    function Cord.Create(ID)
+    -- Cord instance
+    function Cord.CreateCord(ID)
         local cord = {}
-        cord.Data = {}
+        CordList[ID] = cord
+        
         cord.OnReceive = Empty
+        local dataList = {}
+        local keyList = {}
+        local writeOperationList = {}
+        local readOperationList = {}
+        
+        local ClearVars = Empty
+        local AddVar = Empty; local AutoAdd = Empty
+        local AddWrite = Empty; local AddRead = Empty
         
         -- # Methods
         
-        -- Queue Data, sending done in main object
-        function cord:Queue()
-            Queue[ID] = self.Data
+        -- Set variables from table
+        function cord:AddFromTable(Table)
+            ClearVars()
+            
+            if table.isSequential(Table) then
+                for _, var in ipairs(Table) do
+                    AutoAdd(var)
+                end
+            else
+                for k, var in pairs(Table) do
+                    AutoAdd(var, k)
+                end
+            end
+        end
+        
+        -- Queue data, sending done via channel
+        function cord:Queue(Channel)
+            Channel:Queue(ID)
         end
         
         -- Send instance Data immediately
         function cord:SendImmediate(Destination)
-            net.start("mfcs_cord-immediate")
+            net.start(HookImmediateName)
                 net.writeString(ID)
-                net.writeTable(self.Data)
+                self:WriteAll()
             net.send(Destination)
         end
         
-        -- Set data & call OnReceive
-        function cord:RaiseReceived(NewData)
-            self.Data = NewData
-            self.OnReceive()
+        -- Write outgoing data
+        function cord:WriteAll()
+            for _, writeOperation in ipairs(writeOperationList) do
+                writeOperation()
+            end
         end
         
-        Instances[ID] = cord
+        -- Read incoming data & call OnReceive
+        function cord:ReadAll(Length, Sender)
+            for _, readOperation in ipairs(readOperationList) do
+                readOperation()
+            end
+            
+            self.OnReceive(Length, Sender)
+        end
+        
+        -- # Accessors
+        
+        function cord:GetVarIndex(Index) return dataList[Index] end
+        function cord:SetVarIndex(Index, Var) dataList[Index] = Var end
+        
+        function cord:GetVarKey(Key)
+            local index = keyList[Key]
+            return dataList[index]
+        end
+        
+        function cord:SetVarKey(Key, Var)
+            local index = keyList[Key]
+            dataList[index] = Var
+        end
+        
+        function cord:GetData() return dataList end
+        
+        -- Operations on values here do not work, also returns a new table everytime
+        function cord:GetKeyedData()
+            local keyedDataList = {}
+            for k, index in pairs(keyList) do
+                keyedDataList[k] = dataList[index]
+            end
+            
+            return keyedDataList
+        end
+        
+        -- # Typed write, read
+        
+        function cord:AddAuto(Default, Name)
+            return AutoAdd(Default, Name)
+        end
+        
+        function cord:AddBool(Default, Name)
+            local index = AddVar(Default or false, Name)
+            AddWrite(function(Var) net.writeBool(Var) end)
+            AddRead(function() return net.readBool() end)
+            return index
+        end
+        
+        function cord:AddInt(Default, Name)
+            local index = AddVar(Default or 0, Name)
+            AddWrite(function(Var) net.writeInt(Var, 32) end)
+            AddRead(function() return net.readInt(32) end)
+            return index
+        end
+        
+        function cord:AddFloat(Default, Name)
+            local index = AddVar(Default or 0.0, Name)
+            AddWrite(function(Var) net.writeFloat(Var, 32) end)
+            AddRead(function() return net.readFloat(32) end)
+            return index
+        end
+        
+        function cord:AddString(Default, Name)
+            local index = AddVar(Default or "", Name)
+            AddWrite(function(Var) net.writeString(Var) end)
+            AddRead(function() return net.readString() end)
+            return index
+        end
+        
+        function cord:AddEntity(Default, Name)
+            local index = AddVar(Default or NULL, Name)
+            
+            -- # This complains about entities being NULL, despite it being fine with manually being passed NULL???
+            AddWrite(
+                function(Var)
+                    if Var:isValid() then
+                        net.writeEntity(Var)
+                        return
+                    end
+                    net.writeEntity(NULL)
+                end
+            )
+            
+            AddRead(function() return net.readEntity() end)
+            return index
+        end
+        
+        function cord:AddVector(Default, Name)
+            local index = AddVar(Default or Vector(0, 0, 0), Name)
+            AddWrite(function(Var) net.writeVector(Var) end)
+            AddRead(function() return net.readVector() end)
+            return index
+        end
+        
+        function cord:AddAngle(Default, Name)
+            local index = AddVar(Default or Angle(0, 0, 0), Name)
+            AddWrite(function(Var) net.writeAngle(Var) end)
+            AddRead(function() return net.readAngle() end)
+            return index
+        end
+        
+        -- Please, like, never ever used this
+        function cord:AddTable(Default, Name)
+            local index = AddVar(Default or {}, Name)
+            AddWrite(function(Var) net.writeTable(Var) end)
+            AddRead(function() return net.readTable() end)
+            return index
+        end
+        
+        -- # Helpers
+        
+        function AddVar(Var, Name)
+            local varIndex = table.insert(dataList, Var)
+            if Name != nil then keyList[Name] = varIndex end
+            return varIndex
+        end
+        
+        function AddWrite(Func)
+            local index = #dataList
+            table.insert(writeOperationList, function() Func(dataList[index]) end)
+        end
+        
+        function AddRead(Func)
+            local index = #dataList
+            table.insert(readOperationList, function() dataList[index] = Func() end)
+        end
+        
+        function ClearVars()
+            table.empty(dataList)
+            table.empty(keyList)
+            table.empty(writeOperationList)
+            table.empty(readOperationList)
+        end
+        
+        function AutoAdd(Var, Name)
+            local typeString = type(Var)
+            
+            if typeString == "boolean" then
+                return cord:AddBool(Var, Name)
+            end
+            
+            if typeString == "number" then
+                return cord:AddFloat(Var, Name)
+            end
+            
+            if typeString == "string" then
+                return cord:AddString(Var, Name)
+            end
+            
+            if typeString == "Entity" or typeString == "Player" then
+                return cord:AddEntity(Var, Name)
+            end
+            
+            if typeString == "Vector" then
+                return cord:AddVector(Var, Name)
+            end
+            
+            if typeString == "Angle" then
+                return cord:AddAngle(Var, Name)
+            end
+            
+            if typeString == "table" then
+                return cord:AddTable(Var, Name)
+            end
+        end
+        
         return cord
     end
     
-    function Cord:Initialize()
-        net.receive("mfcs_cord", OnReceive)
-        net.receive("mfcs_cord-immediate", OnReceiveImmediate)
-    end
-    
-    -- Send list of table data to server or client(s)
-    function Cord:SendAll(Destination)
-        net.start("mfcs_cord")
-            net.writeTable(Queue)
-        net.send(Destination)
+    -- Channel instance
+    function Cord.CreateChannel()
+        local channel = {}
+        table.insert(ChannelList, channel)
         
-        table.empty(Queue)
-    end
-    
-    -- Listen for list of table data & update data on matching objects
-    function OnReceive()
-        for k, data in pairs(net.readTable()) do
-            Instances[k]:RaiseReceived(data)
+        local cordList = {}
+        local cordLookup = {}
+        
+        -- Send cord data to server or client(s)
+        function channel:SendAll(Destination)
+            if #cordList == 0 then return end
+            
+            net.start(HookName)
+                net.writeInt(#cordList, 32)
+                
+                for _, id in pairs(cordList) do
+                    net.writeString(id)
+                end
+                
+                for _, cordIndex in pairs(cordList) do
+                    CordList[cordIndex]:WriteAll()
+                end
+            net.send(Destination)
+            
+            self:Dump()
         end
-        hook.run(MFCS.EVENT.CORD_RECEIVE)
+        
+        -- Queue cord to be sent
+        function channel:Queue(CordID)
+            if cordLookup[CordID] then return end
+            table.insert(cordList, CordID)
+            cordLookup[CordID] = true
+        end
+        
+        -- Empty cordList
+        function channel:Dump()
+            table.empty(cordList)
+            table.empty(cordLookup)
+        end
+        
+        return channel
     end
     
-    -- Listen for list of table data & update data on matching objects
+    function Cord:Initialize(Prefix)
+        HookName = string.format("%s_cord", Prefix)
+        HookImmediateName = string.format("%s-immediate", HookName)
+        
+        net.receive(HookName, OnReceive)
+        net.receive(HookImmediateName, OnReceiveImmediate)
+    end
+    
+    -- Update data on all queued objects
+    function OnReceive(Length, Player)
+        local count = net.readInt(32)
+        
+        local readList = {}
+        for I = 1, count do
+            table.insert(readList, CordList[net.readString()])
+        end
+        
+        for _, cord in ipairs(readList) do
+            cord:ReadAll(Length, Player)
+        end
+        
+        Cord.OnReceive(Length, Player)
+    end
+    
+    -- Update data on single object
     function OnReceiveImmediate()
-        local id = net.readString()
-        Instances[id]:RaiseReceived(net.readTable())
-        hook.run(MFCS.EVENT.CORD_RECEIVE_IMMEDIATE, id)
+        CordList[net.readString()]:ReadAll()
     end
 end
 
-if SERVER then
-    local Assembly = {}; local Operator = {}
+-- >> EXIO; extra inputs
+do
+    local Defaults = {
+        Boolean = false,
+        Number = 0,
+        String = "",
+        Entity = NULL,
+        Vector = Vector(),
+        Angle = Angle(),
+        Array = {},
+        Table = {},
+    }
     
-    MFCS.EVENT.INITIALIZE = "mfcs-initialize"
-    MFCS.EVENT.MAKE_IO = "mfcs-make_io"
-    MFCS.EVENT.BOARD_VEHICLE = "mfcs-board_vehicle"
-    MFCS.EVENT.PING_DRIVER = "mfcs-ping_driver"
+    local InputTypeList; local OutputTypeList;
+    local InputCordList = {}; local OutputCordList = {}
+    local IOChannel = Cord.CreateChannel()
+    local MarkerCord = Cord.CreateCord("mfcs-exio_marker")
+    
+    local PopulateDefault = Empty
+    
+    -- # Input, output creation
+    
+    function EXIO:AddInput(Name, Type)
+        if InputCordList[Name] then return end
+        
+        local cord = Cord.CreateCord(string.format("mfcs-exio_in-%s", Name))
+        PopulateDefault(cord, Name, Type)
+        InputCordList[Name] = cord
+        
+        if SERVER then
+            table.insert(InputTypeList, { Name = Name, Type = Type })
+        end
+    end
+    
+    function EXIO:AddOutput(Name, Type)
+        if OutputCordList[Name] then return end
+        
+        local cord = Cord.CreateCord(string.format("mfcs-exio_out-%s", Name))
+        PopulateDefault(cord, Name, Type)
+        OutputCordList[Name] = cord
+        
+        if SERVER then
+            table.insert(OutputTypeList, { Name = Name, Type = Type })
+            
+            cord.OnReceive = function(_, Sender)
+                wire.ports[Name] = cord:GetVarIndex(1)
+            end
+        end
+    end
+    
+    -- Specify type for Array & Table, auto for others
+    function PopulateDefault(CordObj, Name, Type)
+        if Type != "Array" and Type != "Table" then
+            CordObj:AddAuto(Defaults[Type], Name)
+        else
+            CordObj:AddTable(Defaults[Type], Name)
+        end
+    end
+    
+    -- # Accessors
+    
+    function EXIO:GetInput(Name) return InputCordList[Name]:GetVarIndex(1) end
+    
+    function EXIO:GetOutput(Name) return OutputCordList[Name]:GetVarIndex(1) end
+    function EXIO:SetOutput(Name, Value)
+        OutputCordList[Name]:SetVarIndex(1, Value)
+        if CLIENT then OutputCordList[Name]:Queue(IOChannel) end
+    end
+    
+    if SERVER then
+        InputTypeList = {}; OutputTypeList = {}
+        
+        local QueueInput = Empty
+        
+        function EXIO:Initialize()
+            for name, cord in pairs(InputCordList) do
+                cord:SetVarIndex(1, wire.ports[name])
+            end
+        end
+        
+        function EXIO:MakeIO()
+            for _, dataType in ipairs(InputTypeList) do
+                MFCS.AddInput(dataType.Name, dataType.Type)
+            end
+            
+            for _, dataType in ipairs(OutputTypeList) do
+                MFCS.AddOutput(dataType.Name, dataType.Type)
+            end
+        end
+        
+        function EXIO:OnInput(Name, Value)
+            local cord = InputCordList[Name]
+            if not cord then return end
+            
+            cord:SetVarIndex(1, Value)
+            cord:Queue(IOChannel)
+        end
+        
+        -- Send IO to target
+        function EXIO:SendIO(Target)
+            MarkerCord:Queue(IOChannel)
+            IOChannel:SendAll(Target)
+        end
+        
+        -- Send all IO to target
+        function EXIO:ResendAllIO(Target)
+            IOChannel:Dump()
+            
+            for name, cord in pairs(InputCordList) do
+                cord:Queue(IOChannel)
+            end
+            
+            for name, cord in pairs(OutputCordList) do
+                cord:Queue(IOChannel)
+            end
+            
+            IOChannel:SendAll(Target)
+        end
+    end
+    
+    if CLIENT then
+        MarkerCord.OnReceive = function()
+            hook.run(MFCS.EVENT.PING_SERVER)
+            IOChannel:SendAll(Target)
+        end
+    end
+end
+
+local DriverCord;
+
+-- Common cords
+do
+    Cord:Initialize("mfcs")
+    
+    local Vars = {
+        Active = false,
+        Connections = {},
+    }
+    DriverCord = Cord.CreateCord("mfcs-core-driver")
+    DriverCord:AddFromTable(Vars)
+end
+
+if SERVER then
+    Assembly = {}; Operator = {}
+    local DriverChannel = Cord.CreateChannel()
     
     -- >> Setup functions
     do
@@ -223,20 +642,14 @@ if SERVER then
     do
         local OnEnterChair = Empty; local OnPingDriver = Empty
         
-        local svMain = MFCS:CreateCord("Core_Main")
-        svMain.Data = {
-            Active = false,
-            Connections = {},
-        }
-        
         function Manager:Initialize()
             Assembly:Initialize()
             Operator:Initialize()
-            Cord:Initialize()
             hook.run(MFCS.EVENT.INITIALIZE)
             
             hook.add("PlayerEnteredVehicle", "mfcs-driver_in", function(Ply, Chair) OnEnterChair(Ply, Chair, true) end)
             hook.add("PlayerLeaveVehicle", "mfcs-driver_out", function(Ply, Chair) OnEnterChair(Ply, Chair, false) end)
+            hook.add("Input", "mfcs_mng-input", function(Name, Value) EXIO:OnInput(Name, Value) end)
             hook.add("DupeFinished", "mfcs-reset", function() restart() end)
             timer.create("mfcs-ping_driver", 1 / Settings.NetworkRate, 0, OnPingDriver)
         end
@@ -255,13 +668,18 @@ if SERVER then
             
             if Board then
                 Operator:SetDriver(Player)
+                EXIO:ResendAllIO(Player)
             else
                 Operator:SetDriver(NULL)
             end
             
-            svMain.Data.Active = Board
-            svMain.Data.Connections = MFCS.GetConnections()
-            svMain:SendImmediate(Player)
+            DriverChannel:Dump()
+            
+            DriverCord:SetVarKey("Active", Board)
+            DriverCord:SetVarKey("Connections", MFCS.GetConnections())
+            DriverCord:Queue(DriverChannel)
+            
+            DriverChannel:SendAll(Player)
             
             hook.run(MFCS.EVENT.BOARD_VEHICLE, Player, Board)
         end
@@ -272,8 +690,7 @@ if SERVER then
             if Operator:GetDriver() == NULL then return end
             
             hook.run(MFCS.EVENT.PING_DRIVER)
-            EXIO:QueueInputs()
-            Cord:SendAll(Operator:GetDriver())
+            EXIO:SendIO(Operator:GetDriver())
         end
     end
     
@@ -355,48 +772,6 @@ if SERVER then
         
         function MFCS.GetDriver() return Driver end
     end
-    
-    -- >> EXIO [SV]; extra inputs
-    do
-        local svInputs = MFCS:CreateCord("EXIO_Inputs")
-        local clOutputs = MFCS:CreateCord("EXIO_Outputs")
-        
-        local InputDataTypes = {}; local OutputDataTypes = {}
-        
-        function EXIO:MakeIO()
-            for _, dataType in ipairs(InputDataTypes) do
-                MFCS.AddInput(dataType.Name, dataType.Type)
-            end
-            
-            for _, dataType in ipairs(OutputDataTypes) do
-                MFCS.AddOutput(dataType.Name, dataType.Type)
-            end
-        end
-        
-        clOutputs.OnReceive = function()
-            for k, value in pairs(clOutputs.Data) do
-                wire.ports[k] = value
-            end
-        end
-        
-        -- Identify inputs & queue
-        function EXIO:QueueInputs()
-            for _, dataType in ipairs(InputDataTypes) do
-                svInputs.Data[dataType.Name] = wire.ports[dataType.Name]
-            end
-            
-            svInputs:Queue()
-        end
-        
-        -- # Create io
-        function EXIO:AddInput(Name, Type)
-            table.insert(InputDataTypes, { Name = Name, Type = Type })
-        end
-        
-        function EXIO:AddOutput(Name, Type)
-            table.insert(OutputDataTypes, { Name = Name, Type = Type })
-        end
-    end
 end
 
 if CLIENT then
@@ -409,25 +784,9 @@ if CLIENT then
         REQUEST_ANSWER = "mfcs_core-request_answer",
     }
     
-    -- >> Globals
+    -- >> Module access definitions
     do
-        MFCS.EVENT.AUTHORIZE = "mfcs-authorize"
-        MFCS.EVENT.OPERATOR_KEY = "mfcs-operator_key"
-        MFCS.EVENT.OPERATOR_SCROLL = "mfcs-operator_scroll"
-        MFCS.EVENT.PING_SERVER = "mfcs-ping_server"
-        MFCS.EVENT.LOGIC_TICK = "mfcs-logic_tick"
-        MFCS.EVENT.CAMERA_AIM = "mfcs_camera-aim"
-        MFCS.EVENT.CAMERA_ZOOM = "mfcs_camera-zoom"
-        MFCS.EVENT.CAMERA_SWITCH = "mfcs_camera-switch"
-        MFCS.EVENT.COMPUTER_RANGE = "mfcs_computer-range"
-        MFCS.EVENT.COMPUTER_MANUAL_RANGING = "mfcs_computer-manual_ranging"
-        MFCS.EVENT.COMPUTER_OPTICAL_RANGING = "mfcs_computer-optical_ranging"
-        MFCS.EVENT.COMPUTER_LOCK = "mfcs_computer-lock"
-        
-        -- # Module globals
-        
         MFCS.Camera = {}
-        
         function MFCS.Camera:GetTag() return "" end
         function MFCS.Camera:GetOrigin() return Vector() end
         function MFCS.Camera:GetPosition() return Vector() end
@@ -439,7 +798,6 @@ if CLIENT then
         function MFCS.Camera:GetOpticalRanging() return false end
         
         MFCS.Computer = {}
-        
         function MFCS.Computer:GetWeapon() return {} end
         function MFCS.Computer:GetAllSystems() return {} end
         function MFCS.Computer:GetRange() return 0 end
@@ -450,7 +808,6 @@ if CLIENT then
         function MFCS.Computer:GetManualRangingKeyDown() return false end
         
         MFCS.Graphic = {}
-        
         function MFCS.Graphic:SetupRangefinder() end
     end
     
@@ -473,39 +830,29 @@ if CLIENT then
     -- >> Manager [CL]; it manages things
     do
         local LogicRate = 0
-        local SetActive = Empty
-        local OnHUDToggle = Empty; local OnPingServer = Empty
-        
-        local svMain = MFCS:CreateCord("Core_Main")
-        svMain.Data = {
-            Active = false,
-            Connections = {},
-        }
+        local SetActive = Empty; local OnHUDToggle = Empty
         
         function Manager:Initialize()
             LogicRate = 1 / Settings.RefreshRate
-            Cord:Initialize()
             
             hook.add("HUDConnected", "mfcs-hud_connect", function() OnHUDToggle(true) end)
             hook.add("HUDDisconnected", "mfcs-hud_disconnect", function() OnHUDToggle(false) end)
         end
         
         function Manager:Authorize()
-            if svMain.Data.Active then SetActive() end
-            timer.create("mfcs-ping_server", 1 / Settings.NetworkRate, 0, OnPingServer)
-            
+            if DriverCord:GetVarKey("Active") then SetActive() end
             hook.run(MFCS.EVENT.AUTHORIZE)
         end
         
         -- Entering or leaving vehicle
-        svMain.OnReceive = function()
+        DriverCord.OnReceive = function()
             if not Settings.UseHUDComponent then
-                enableHud(player(), svMain.Data.Active)
+                enableHud(player(), DriverCord:GetVarKey("Active"))
             end
             
-            ELIST:SetEntities(svMain.Data.Connections)
+            ELIST:SetEntities(DriverCord:GetVarKey("Connections"))
             
-            if svMain.Data.Active and not MFCS.GetReady() then return end
+            if DriverCord:GetVarKey("Active") and not MFCS.GetReady() then return end
             
             SetActive()
         end
@@ -513,26 +860,18 @@ if CLIENT then
         -- # Passthroughs
         
         function SetActive()
-            if svMain.Data.Active then
+            if DriverCord:GetVarKey("Active") then
                 timer.create("mfcs-logic_tick", 1 / Settings.RefreshRate, 0, function() hook.run(MFCS.EVENT.LOGIC_TICK) end)
             else
                 //ELIST:RemoveHooks()
                 timer.remove("mfcs-logic_tick")
             end
             
-            Keys:SetLogging(svMain.Data.Active)
+            Keys:SetLogging(DriverCord:GetVarKey("Active"))
         end
         
         function OnHUDToggle(Active)
             if Active then Requestor:SendRequest() end
-        end
-        
-        function OnPingServer()
-            if not svMain.Data.Active then return end
-            
-            hook.run(MFCS.EVENT.PING_SERVER)
-            EXIO:QueueOutputs()
-            Cord:SendAll()
         end
         
         -- # Accessors
@@ -592,44 +931,6 @@ if CLIENT then
         -- # Accessors
         
         function MFCS.GetReady() return Ready end
-    end
-    
-    -- >> EXIO [CL]; extra inputs
-    do
-        local svInputs = MFCS:CreateCord("EXIO_Inputs")
-        local clOutputs = MFCS:CreateCord("EXIO_Outputs")
-        
-        local Defaults = {
-            Number = 0,
-            String = "",
-            Entity = NULL,
-            Vector = Vector(),
-            Angle = Angle(),
-            Array = {},
-            Table = {},
-        }
-        
-        -- Queue
-        function EXIO:QueueOutputs()
-            clOutputs:Queue()
-        end
-        
-        -- # Create io
-        
-        function EXIO:AddInput(Name, Type)
-            svInputs.Data[Name] = Defaults[Type]
-        end
-        
-        function EXIO:AddOutput(Name, Type)
-            clOutputs.Data[Name] = Defaults[Type]
-        end
-        
-        -- # Accessors
-        
-        function MFCS:GetInput(Name) return svInputs.Data[Name] end
-        
-        function MFCS:GetOutput(Name) return clOutputs.Data[Name] end
-        function MFCS:SetOutput(Name, Value) clOutputs.Data[Name] = Value end
     end
     
     -- >> Keys; keeps track of & updates user input
